@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2009 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2010 Simon Kelley
  
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -14,7 +14,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#define COPYRIGHT "Copyright (C) 2000-2009 Simon Kelley" 
+#define COPYRIGHT "Copyright (c) 2000-2010 Simon Kelley" 
 
 #ifndef NO_LARGEFILE
 /* Ensure we can use files >2GB (log files may grow this big) */
@@ -24,10 +24,14 @@
 
 /* Get linux C library versions. */
 #ifdef __linux__
-#  ifndef __ANDROID__
-#      define _GNU_SOURCE
-#  endif
+#  define _GNU_SOURCE
 #  include <features.h> 
+#endif
+
+/* Need these defined early */
+#if defined(__sun) || defined(__sun__)
+#  define _XPG4_2
+#  define __EXTENSIONS__
 #endif
 
 /* get these before config.h  for IPv6 stuff... */
@@ -39,11 +43,7 @@
 #  include <nameser.h>
 #  include <arpa/nameser_compat.h>
 #else
-#  ifdef __ANDROID__
-#    include "nameser.h"
-#  else
-#    include <arpa/nameser.h>
-#  endif
+#  include <arpa/nameser.h>
 #endif
 
 /* and this. */
@@ -64,7 +64,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #if defined(HAVE_SOLARIS_NETWORK)
-#include <sys/sockio.h>
+#  include <sys/sockio.h>
 #endif
 #include <sys/select.h>
 #include <sys/wait.h>
@@ -72,6 +72,10 @@
 #include <sys/un.h>
 #include <limits.h>
 #include <net/if.h>
+#if defined(HAVE_SOLARIS_NETWORK) && !defined(ifr_mtu)
+/* Some solaris net/if./h omit this. */
+#  define ifr_mtu  ifr_ifru.ifru_metric
+#endif
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -85,7 +89,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <stdarg.h>
-#if defined(__OpenBSD__) || defined(__NetBSD__) || defined(__sun__) || defined (__sun) || defined (__ANDROID__)
+#if defined(__OpenBSD__) || defined(__NetBSD__) || defined(__sun__) || defined (__sun)
 #  include <netinet/if_ether.h>
 #else
 #  include <net/ethernet.h>
@@ -321,7 +325,6 @@ struct serverfd {
   union mysockaddr source_addr;
   char interface[IF_NAMESIZE+1];
   struct serverfd *next;
-  uint32_t mark;
 };
 
 struct randfd {
@@ -336,7 +339,6 @@ struct server {
   char *domain; /* set if this server only handles a domain. */ 
   int flags, tcpfd;
   unsigned int queries, failed_queries;
-  uint32_t mark;
   struct server *next; 
 };
 
@@ -348,7 +350,7 @@ struct irec {
 };
 
 struct listener {
-  int fd, tcpfd, family;
+  int fd, tcpfd, tftpfd, family;
   struct irec *iface; /* only valid for non-wildcard */
   struct listener *next;
 };
@@ -419,8 +421,8 @@ struct dhcp_lease {
   int hwaddr_len, hwaddr_type;
   unsigned char hwaddr[DHCP_CHADDR_MAX]; 
   struct in_addr addr, override, giaddr;
-  unsigned char *vendorclass, *userclass, *supplied_hostname;
-  unsigned int vendorclass_len, userclass_len, supplied_hostname_len;
+  unsigned char *extradata;
+  unsigned int extradata_len, extradata_size;
   int last_interface;
   struct dhcp_lease *next;
 };
@@ -490,6 +492,7 @@ struct dhcp_opt {
 #define DHOPT_VENDOR           256
 #define DHOPT_HEX              512
 #define DHOPT_VENDOR_MATCH    1024
+#define DHOPT_RFC3925         2048
 
 struct dhcp_boot {
   char *file, *sname;
@@ -575,6 +578,26 @@ struct ping_result {
   struct ping_result *next;
 };
 
+struct tftp_file {
+  int refcount, fd;
+  off_t size;
+  dev_t dev;
+  ino_t inode;
+  char filename[];
+};
+
+struct tftp_transfer {
+  int sockfd;
+  time_t timeout;
+  int backoff;
+  unsigned int block, blocksize, expansion;
+  off_t offset;
+  struct sockaddr_in peer;
+  char opt_blocksize, opt_transize, netascii, carrylf;
+  struct tftp_file *file;
+  struct tftp_transfer *next;
+};
+
 extern struct daemon {
   /* datastuctures representing the command-line and 
      config file arguments. All set (including defaults)
@@ -617,12 +640,13 @@ extern struct daemon {
   int enable_pxe;
   struct dhcp_netid_list *dhcp_ignore, *dhcp_ignore_names, *force_broadcast, *bootp_dynamic;
   char *dhcp_hosts_file, *dhcp_opts_file;
-  int dhcp_max;
+  int dhcp_max, tftp_max;
   int dhcp_server_port, dhcp_client_port;
+  int start_tftp_port, end_tftp_port; 
   unsigned int min_leasetime;
   struct doctor *doctors;
   unsigned short edns_pktsz;
-  uint32_t listen_mark;
+  char *tftp_prefix; 
 
   /* globally used stuff for DNS */
   char *packet; /* packet buffer */
@@ -641,9 +665,10 @@ extern struct daemon {
   struct randfd *rfd_save; /*      "        "        */
   pid_t tcp_pids[MAX_PROCS];
   struct randfd randomsocks[RANDOM_SOCKS];
+  int v6pktinfo; 
 
   /* DHCP state */
-  int dhcpfd, helperfd; 
+  int dhcpfd, helperfd, pxefd; 
 #if defined(HAVE_LINUX_NETWORK)
   int netlinkfd;
 #elif defined(HAVE_BSD_NETWORK)
@@ -654,6 +679,16 @@ extern struct daemon {
   struct ping_result *ping_results;
   FILE *lease_stream;
   struct dhcp_bridge *bridges;
+
+  /* DBus stuff */
+  /* void * here to avoid depending on dbus headers outside dbus.c */
+  void *dbus;
+#ifdef HAVE_DBUS
+  struct watch *watches;
+#endif
+
+  /* TFTP stuff */
+  struct tftp_transfer *tftp_trans;
 
 } *daemon;
 
@@ -711,9 +746,8 @@ int hostname_isequal(char *a, char *b);
 time_t dnsmasq_time(void);
 int is_same_net(struct in_addr a, struct in_addr b, struct in_addr mask);
 int retry_send(void);
-int parse_addr(int family, const char *addrstr, union mysockaddr *addr);
 void prettyprint_time(char *buf, unsigned int t);
-int prettyprint_addr(const union mysockaddr *addr, char *buf);
+int prettyprint_addr(union mysockaddr *addr, char *buf);
 int parse_hex(char *in, unsigned char *out, int maxlen, 
 	      unsigned int *wildcard_mask, int *mac_type);
 int memcmp_masked(unsigned char *a, unsigned char *b, int len, 
@@ -747,14 +781,10 @@ struct frec *get_new_frec(time_t now, int *wait);
 
 /* network.c */
 int indextoname(int fd, int index, char *name);
-int local_bind(int fd, union mysockaddr *addr, char *intname, uint32_t mark, int is_tcp);
+int local_bind(int fd, union mysockaddr *addr, char *intname, int is_tcp);
 int random_sock(int family);
 void pre_allocate_sfds(void);
 int reload_servers(char *fname);
-#if defined(__ANDROID__) && !defined(__BRILLO__)
-int set_servers(const char *servers);
-void set_interfaces(const char *interfaces);
-#endif
 void check_servers(void);
 int enumerate_interfaces();
 struct listener *create_wildcard_listeners(void);
@@ -766,7 +796,7 @@ struct in_addr get_ifaddr(char *intr);
 /* dhcp.c */
 #ifdef HAVE_DHCP
 void dhcp_init(void);
-void dhcp_packet(time_t now);
+void dhcp_packet(time_t now, int pxe_fd);
 struct dhcp_context *address_available(struct dhcp_context *context, 
 				       struct in_addr addr,
 				       struct dhcp_netid *netids);
@@ -814,7 +844,7 @@ void rerun_scripts(void);
 /* rfc2131.c */
 #ifdef HAVE_DHCP
 size_t dhcp_reply(struct dhcp_context *context, char *iface_name, int int_index,
-		  size_t sz, time_t now, int unicast_dest, int *is_inform);
+		  size_t sz, time_t now, int unicast_dest, int *is_inform, int pxe_fd);
 unsigned char *extended_hwaddr(int hwtype, int hwlen, unsigned char *hwaddr, 
 			       int clid_len, unsigned char *clid, int *len_out);
 #endif
@@ -843,6 +873,16 @@ void send_via_bpf(struct dhcp_packet *mess, size_t len,
 /* bpf.c or netlink.c */
 int iface_enumerate(void *parm, int (*ipv4_callback)(), int (*ipv6_callback)());
 
+/* dbus.c */
+#ifdef HAVE_DBUS
+char *dbus_init(void);
+void check_dbus_listeners(fd_set *rset, fd_set *wset, fd_set *eset);
+void set_dbus_listeners(int *maxfdp, fd_set *rset, fd_set *wset, fd_set *eset);
+#  ifdef HAVE_DHCP
+void emit_dbus_signal(int action, struct dhcp_lease *lease, char *hostname);
+#  endif
+#endif
+
 /* helper.c */
 #if defined(HAVE_DHCP) && !defined(NO_FORK)
 int create_helper(int event_fd, int err_fd, uid_t uid, gid_t gid, long max_fd);
@@ -850,4 +890,10 @@ void helper_write(void);
 void queue_script(int action, struct dhcp_lease *lease, 
 		  char *hostname, time_t now);
 int helper_buf_empty(void);
+#endif
+
+/* tftp.c */
+#ifdef HAVE_TFTP
+void tftp_request(struct listener *listen, time_t now);
+void check_tftp_listeners(fd_set *rset, time_t now);
 #endif

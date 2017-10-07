@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2009 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2010 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@ static struct frec *lookup_frec(unsigned short id, unsigned int crc);
 static struct frec *lookup_frec_by_sender(unsigned short id,
 					  union mysockaddr *addr,
 					  unsigned int crc);
-static unsigned short get_id(int force, unsigned short force_id, unsigned int crc);
+static unsigned short get_id(unsigned int crc);
 static void free_frec(struct frec *f);
 static struct randfd *allocate_rfd(int family);
 
@@ -86,7 +86,7 @@ static void send_from(int fd, int nowild, char *packet, size_t len,
 	  pkt->ipi6_ifindex = iface; /* Need iface for IPv6 to handle link-local addrs */
 	  pkt->ipi6_addr = source->addr.addr6;
 	  msg.msg_controllen = cmptr->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-	  cmptr->cmsg_type = IPV6_PKTINFO;
+	  cmptr->cmsg_type = daemon->v6pktinfo;
 	  cmptr->cmsg_level = IPV6_LEVEL;
 	}
 #else
@@ -242,15 +242,11 @@ static int forward_query(int udpfd, union mysockaddr *udpaddr,
       
       if (forward)
 	{
-	  /* force unchanging id for signed packets */
-	  int is_sign;
-	  find_pseudoheader(header, plen, NULL, NULL, &is_sign);
-	  
 	  forward->source = *udpaddr;
 	  forward->dest = *dst_addr;
 	  forward->iface = dst_iface;
 	  forward->orig_id = ntohs(header->id);
-	  forward->new_id = get_id(is_sign, forward->orig_id, crc);
+	  forward->new_id = get_id(crc);
 	  forward->fd = udpfd;
 	  forward->crc = crc;
 	  forward->forwardall = 0;
@@ -318,20 +314,8 @@ static int forward_query(int udpfd, union mysockaddr *udpaddr,
 		      daemon->rfd_save = forward->rfd4;
 		      fd = forward->rfd4->fd;
 		    }
-
-#ifdef ANDROID
-		  // Mark the socket so it goes out on the correct network. Note
-		  // that we never clear the mark, only re-set it the next time we
-		  // allocate a new random fd. This is because we buffer DNS
-		  // queries (in daemon->srv_save, daemon->packet_len) and socket
-		  // file descriptors (in daemon->rfd_save) with the expectation of
-		  // being able to use them again.
-		  //
-		  // Server fds are marked separately in allocate_sfd.
-		  setsockopt(fd, SOL_SOCKET, SO_MARK, &start->mark, sizeof(start->mark));
-#endif
 		}
-
+	      
 	      if (sendto(fd, (char *)header, plen, 0,
 			 &start->addr.sa,
 			 sa_len(&start->addr)) == -1)
@@ -673,7 +657,7 @@ void receive_query(struct listener *listen, time_t now)
       if (listen->family == AF_INET6)
 	{
 	  for (cmptr = CMSG_FIRSTHDR(&msg); cmptr; cmptr = CMSG_NXTHDR(&msg, cmptr))
-	    if (cmptr->cmsg_level == IPV6_LEVEL && cmptr->cmsg_type == IPV6_PKTINFO)
+	    if (cmptr->cmsg_level == IPV6_LEVEL && cmptr->cmsg_type == daemon->v6pktinfo)
 	      {
 		dst_addr.addr.addr6 = ((struct in6_pktinfo *)CMSG_DATA(cmptr))->ipi6_addr;
 		if_index =((struct in6_pktinfo *)CMSG_DATA(cmptr))->ipi6_ifindex;
@@ -827,8 +811,7 @@ unsigned char *tcp_request(int confd, time_t now,
 		  
 		  if ((last_server->tcpfd == -1) &&
 		      (last_server->tcpfd = socket(last_server->addr.sa.sa_family, SOCK_STREAM, 0)) != -1 &&
-		      (!local_bind(last_server->tcpfd, &last_server->source_addr,
-				   last_server->interface, last_server->mark, 1) ||
+		      (!local_bind(last_server->tcpfd,  &last_server->source_addr, last_server->interface, 1) ||
 		       connect(last_server->tcpfd, &last_server->addr.sa, sa_len(&last_server->addr)) == -1))
 		    {
 		      close(last_server->tcpfd);
@@ -1079,22 +1062,12 @@ void server_gone(struct server *server)
     daemon->srv_save = NULL;
 }
 
-/* return unique random ids.
-   For signed packets we can't change the ID without breaking the
-   signing, so we keep the same one. In this case force is set, and this
-   routine degenerates into killing any conflicting forward record. */
-static unsigned short get_id(int force, unsigned short force_id, unsigned int crc)
+/* return unique random ids. */
+static unsigned short get_id(unsigned int crc)
 {
   unsigned short ret = 0;
   
-  if (force)
-    {
-      struct frec *f = lookup_frec(force_id, crc);
-      if (f)
-	free_frec(f); /* free */
-      ret = force_id;
-    }
-  else do 
+  do 
     ret = rand16();
   while (lookup_frec(ret, crc));
   

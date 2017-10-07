@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2009 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2010 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -102,7 +102,6 @@ struct myoption {
 #define LOPT_PXE_PROMT 291
 #define LOPT_PXE_SERV  292
 #define LOPT_TEST      293
-#define LOPT_LISTNMARK 294
 
 #ifdef HAVE_GETOPT_LONG
 static const struct option opts[] =  
@@ -209,9 +208,6 @@ static const struct myoption opts[] =
     { "cname", 1, 0, LOPT_CNAME },
     { "pxe-prompt", 1, 0, LOPT_PXE_PROMT },
     { "pxe-service", 1, 0, LOPT_PXE_SERV },
-#ifdef __ANDROID__
-    { "listen-mark", 1, 0, LOPT_LISTNMARK },
-#endif /* __ANDROID__ */
     { "test", 0, 0, LOPT_TEST },
     { NULL, 0, 0, 0 }
   };
@@ -326,7 +322,6 @@ static struct {
   { LOPT_CNAME, ARG_DUP, "<alias>,<target>", gettext_noop("Specify alias name for LOCAL DNS name."), NULL },
   { LOPT_PXE_PROMT, ARG_DUP, "<prompt>,[<timeout>]", gettext_noop("Prompt to send to PXE clients."), NULL },
   { LOPT_PXE_SERV, ARG_DUP, "<service>", gettext_noop("Boot service for PXE menu."), NULL },
-  { LOPT_LISTNMARK, ARG_ONE, NULL, gettext_noop("Socket mark to use for listen sockets."), NULL },
   { LOPT_TEST, 0, NULL, gettext_noop("Check configuration syntax."), NULL },
   { 0, 0, NULL, NULL, NULL }
 }; 
@@ -411,6 +406,7 @@ static const struct {
   { "domain-search", 119, 0 },
   { "sip-server", 120, 0 },
   { "classless-static-route", 121, 0 },
+  { "vendor-id-encap", 125, 0 },
   { "server-ip-address", 255, OT_ADDR_LIST }, /* special, internal only, sets siaddr */
   { NULL, 0, 0 }
 };
@@ -611,6 +607,7 @@ static void do_usage(void)
     { '*', EDNS_PKTSZ },
     { '&', MAXLEASES },
     { '!', FTABSIZ },
+    { '#', TFTP_MAX_CONNECTIONS },
     { '\0', 0 }
   };
 
@@ -720,6 +717,16 @@ static char *parse_dhcp_opt(char *arg, int flags)
 	  new->u.encap = atoi(arg+6);
 	  new->flags |= DHOPT_ENCAPSULATE;
 	}
+      else if (strstr(arg, "vi-encap:") == arg)
+	{
+	  new->u.encap = atoi(arg+9);
+	  new->flags |= DHOPT_RFC3925;
+	  if (flags == DHOPT_MATCH)
+	    {
+	      new->opt = 1; /* avoid error below */
+	      break;
+	    }
+	}
       else
 	{
 	  new->netid = opt_malloc(sizeof (struct dhcp_netid));
@@ -735,6 +742,7 @@ static char *parse_dhcp_opt(char *arg, int flags)
       arg = comma; 
     }
   
+  /* option may be missing with rfc3925 match */
   if (new->opt == 0)
     problem = _("bad dhcp-option");
   else if (comma)
@@ -839,7 +847,7 @@ static char *parse_dhcp_opt(char *arg, int flags)
 	  new->val = op = opt_malloc((5 * addrs) + 1);
 	  new->flags |= DHOPT_ADDR;
 
-	  if (!(new->flags & DHOPT_ENCAPSULATE) && new->opt == 120)
+	  if (!(new->flags & (DHOPT_ENCAPSULATE | DHOPT_VENDOR | DHOPT_RFC3925)) && new->opt == 120)
 	    {
 	      *(op++) = 1; /* RFC 3361 "enc byte" */
 	      new->flags &= ~DHOPT_ADDR;
@@ -876,7 +884,7 @@ static char *parse_dhcp_opt(char *arg, int flags)
       else if (is_string)
 	{
 	  /* text arg */
-	  if ((new->opt == 119 || new->opt == 120) && !(new->flags & DHOPT_ENCAPSULATE))
+	  if ((new->opt == 119 || new->opt == 120) && !(new->flags & (DHOPT_ENCAPSULATE | DHOPT_VENDOR | DHOPT_RFC3925)))
 	    {
 	      /* dns search, RFC 3397, or SIP, RFC 3361 */
 	      unsigned char *q, *r, *tail;
@@ -950,7 +958,9 @@ static char *parse_dhcp_opt(char *arg, int flags)
 	}
     }
 
-  if ((new->len > 255) || (new->len > 253 && (new->flags & (DHOPT_VENDOR | DHOPT_ENCAPSULATE))))
+  if ((new->len > 255) || 
+      (new->len > 253 && (new->flags & (DHOPT_VENDOR | DHOPT_ENCAPSULATE))) ||
+      (new->len > 250 && (new->flags & DHOPT_RFC3925)))
     problem = _("dhcp-option too long");
   
   if (!problem)
@@ -1114,10 +1124,7 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
       if (strchr(arg, '/'))
 	daemon->log_file = opt_string_alloc(arg);
       else
-	{
-#ifdef __ANDROID__
-	    problem = "Android does not support log facilities";
-#else	  
+	{	  
 	  for (i = 0; facilitynames[i].c_name; i++)
 	    if (hostname_isequal((char *)facilitynames[i].c_name, arg))
 	      break;
@@ -1126,7 +1133,6 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 	    daemon->log_fac = facilitynames[i].c_val;
 	  else
 	    problem = "bad log facility";
-#endif
 	}
       break;
       
@@ -1356,9 +1362,25 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 	comma = split(arg);
 	unhide_metas(arg);
 	new->next = daemon->if_addrs;
-	if (arg &&
-	    parse_addr(AF_INET, arg, &new->addr) != 0 &&
-	    parse_addr(AF_INET6, arg, &new->addr) != 0)
+	if (arg && (new->addr.in.sin_addr.s_addr = inet_addr(arg)) != (in_addr_t)-1)
+	  {
+	    new->addr.sa.sa_family = AF_INET;
+#ifdef HAVE_SOCKADDR_SA_LEN
+	    new->addr.in.sin_len = sizeof(new->addr.in);
+#endif
+	  }
+#ifdef HAVE_IPV6
+	else if (arg && inet_pton(AF_INET6, arg, &new->addr.in6.sin6_addr) > 0)
+	  {
+	    new->addr.sa.sa_family = AF_INET6;
+	    new->addr.in6.sin6_flowinfo = 0;
+	    new->addr.in6.sin6_scope_id = 0;
+#ifdef HAVE_SOCKADDR_SA_LEN
+	    new->addr.in6.sin6_len = sizeof(new->addr.in6);
+#endif
+	  }
+#endif
+	else
 	  {
 	    option = '?'; /* error */
 	    break;
@@ -1437,20 +1459,22 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 		!atoi_check16(portno, &serv_port))
 	      problem = _("bad port");
 	    
-	    if (parse_addr(AF_INET, arg, &newlist->addr) == 0)
+	    if ((newlist->addr.in.sin_addr.s_addr = inet_addr(arg)) != (in_addr_t) -1)
 	      {
 		newlist->addr.in.sin_port = htons(serv_port);	
+		newlist->source_addr.in.sin_port = htons(source_port); 
+		newlist->addr.sa.sa_family = newlist->source_addr.sa.sa_family = AF_INET;
 #ifdef HAVE_SOCKADDR_SA_LEN
 		newlist->source_addr.in.sin_len = newlist->addr.in.sin_len = sizeof(struct sockaddr_in);
 #endif
 		if (source)
 		  {
 		    newlist->flags |= SERV_HAS_SOURCE;
-		    if (parse_addr(AF_INET, source, &newlist->addr) != 0)
+		    if ((newlist->source_addr.in.sin_addr.s_addr = inet_addr(source)) == (in_addr_t) -1)
 		      {
 #if defined(SO_BINDTODEVICE)
 			newlist->source_addr.in.sin_addr.s_addr = INADDR_ANY;
-			strncpy(newlist->interface, source, IF_NAMESIZE);
+			strncpy(newlist->interface, source, IF_NAMESIZE - 1);
 #else
 			problem = _("interface binding not supported");
 #endif
@@ -1458,22 +1482,24 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 		  }
 		else
 		  newlist->source_addr.in.sin_addr.s_addr = INADDR_ANY;
-
-		newlist->source_addr.in.sin_port = htons(source_port);
-		newlist->source_addr.sa.sa_family = AF_INET;
 	      }
 #ifdef HAVE_IPV6
-	    else if (parse_addr(AF_INET6, arg, &newlist->addr) == 0)
+	    else if (inet_pton(AF_INET6, arg, &newlist->addr.in6.sin6_addr) > 0)
 	      {
 		newlist->addr.in6.sin6_port = htons(serv_port);
+		newlist->source_addr.in6.sin6_port = htons(source_port);
+		newlist->addr.sa.sa_family = newlist->source_addr.sa.sa_family = AF_INET6;
+#ifdef HAVE_SOCKADDR_SA_LEN
+		newlist->addr.in6.sin6_len = newlist->source_addr.in6.sin6_len = sizeof(newlist->addr.in6);
+#endif
 		if (source)
 		  {
 		     newlist->flags |= SERV_HAS_SOURCE;
-		     if (parse_addr(AF_INET6, source, &newlist->source_addr) != 0)
+		     if (inet_pton(AF_INET6, source, &newlist->source_addr.in6.sin6_addr) == 0)
 		      {
 #if defined(SO_BINDTODEVICE)
 			newlist->source_addr.in6.sin6_addr = in6addr_any; 
-			strncpy(newlist->interface, source, IF_NAMESIZE);
+			strncpy(newlist->interface, source, IF_NAMESIZE - 1);
 #else
 			problem = _("interface binding not supported");
 #endif
@@ -1481,9 +1507,6 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 		  }
 		else
 		  newlist->source_addr.in6.sin6_addr = in6addr_any; 
-
-		newlist->source_addr.in6.sin6_port = htons(source_port);
-		newlist->source_addr.sa.sa_family = AF_INET6;
 	      }
 #endif
 	    else
@@ -1584,17 +1607,43 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 	option = '?';
       break;
 #endif
+      
+#ifdef HAVE_TFTP
+    case LOPT_TFTP_MAX:  /*  --tftp-max */
+      if (!atoi_check(arg, &daemon->tftp_max))
+	option = '?';
+      break;  
 
+    case LOPT_PREFIX: /* --tftp-prefix */
+      daemon->tftp_prefix = opt_string_alloc(arg);
+      break;
+
+    case LOPT_TFTPPORTS: /* --tftp-port-range */
+      if (!(comma = split(arg)) || 
+	  !atoi_check16(arg, &daemon->start_tftp_port) ||
+	  !atoi_check16(comma, &daemon->end_tftp_port))
+	problem = _("bad port range");
+      
+      if (daemon->start_tftp_port > daemon->end_tftp_port)
+	{
+	  int tmp = daemon->start_tftp_port;
+	  daemon->start_tftp_port = daemon->end_tftp_port;
+	  daemon->end_tftp_port = tmp;
+	} 
+      
+      break;
+#endif
+	      
     case LOPT_BRIDGE:   /* --bridge-interface */
       {
 	struct dhcp_bridge *new = opt_malloc(sizeof(struct dhcp_bridge));
-	if (!(comma = split(arg)))
+	if (!(comma = split(arg)) || strlen(arg) > IF_NAMESIZE - 1 )
 	  {
 	    problem = _("bad bridge-interface");
 	    break;
 	  }
 	
-	strncpy(new->iface, arg, IF_NAMESIZE);
+	strcpy(new->iface, arg);
 	new->alias = NULL;
 	new->next = daemon->bridges;
 	daemon->bridges = new;
@@ -1602,12 +1651,12 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 	do {
 	  arg = comma;
 	  comma = split(arg);
-	  if (strlen(arg) != 0)
+	  if (strlen(arg) != 0 && strlen(arg) <= IF_NAMESIZE - 1)
 	    {
 	      struct dhcp_bridge *b = opt_malloc(sizeof(struct dhcp_bridge)); 
 	      b->next = new->alias;
 	      new->alias = b;
-	      strncpy(b->iface, arg, IF_NAMESIZE);
+	      strcpy(b->iface, arg);
 	    }
 	} while (comma);
 	
@@ -2032,7 +2081,12 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 		 new->CSA = i;
 		 new->menu = opt_string_alloc(arg);
 		 
-		 if (comma)
+		 if (!comma)
+		   {
+		     new->type = 0; /* local boot */
+		     new->basename = NULL;
+		   }
+		 else
 		   {
 		     arg = comma;
 		     comma = split(arg);
@@ -2049,21 +2103,22 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 		     
 		     if (comma && (new->server.s_addr = inet_addr(comma)) == (in_addr_t)-1)
 		       option = '?';
-		     
-		     /* Order matters */
-		     new->next = NULL;
-		     if (!daemon->pxe_services)
-		       daemon->pxe_services = new; 
-		     else
-		       {
-			 struct pxe_service *s;
-			 for (s = daemon->pxe_services; s->next; s = s->next);
-			 s->next = new;
-		       }
-		     
-		     daemon->enable_pxe = 1;
-		     break;
 		   }
+
+		 /* Order matters */
+		 new->next = NULL;
+		 if (!daemon->pxe_services)
+		   daemon->pxe_services = new; 
+		 else
+		   {
+		     struct pxe_service *s;
+		     for (s = daemon->pxe_services; s->next; s = s->next);
+		     s->next = new;
+		   }
+		 
+		 daemon->enable_pxe = 1;
+		 break;
+		
 	       }
 	   }
 	 
@@ -2475,21 +2530,8 @@ static char *one_opt(int option, char *arg, char *gen_prob, int nest)
 	break;
       }
       
-    case LOPT_LISTNMARK: /* --listen-mark */
-      {
-	char *endptr;
-	uint32_t mark = strtoul(arg, &endptr, 0);
-        // my_syslog(LOG_WARNING, "passed-in mark: %s", arg);
-	if (!*endptr)
-	  daemon->listen_mark = mark;
-	else
-	  problem = _("invalid mark");
-        // my_syslog(LOG_WARNING, "daemon->listen_mark: 0x%x, *endptr=%d", daemon->listen_mark, *endptr);
-	break;
-      }
-
     default:
-      return _("unsupported option (check that dnsmasq was compiled with DHCP support)");
+      return _("unsupported option (check that dnsmasq was compiled with DHCP/TFTP/DBus support)");
 
     }
 
@@ -2775,6 +2817,7 @@ void read_opts(int argc, char **argv, char *compile_opts)
   daemon->username = CHUSER;
   daemon->runfile =  RUNFILE;
   daemon->dhcp_max = MAXLEASES;
+  daemon->tftp_max = TFTP_MAX_CONNECTIONS;
   daemon->edns_pktsz = EDNS_PKTSZ;
   daemon->log_fac = -1;
   add_txt("version.bind", "dnsmasq-" VERSION );

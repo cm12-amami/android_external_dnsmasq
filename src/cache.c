@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2009 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2010 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1245,7 +1245,6 @@ void log_query(unsigned short flags, char *name, struct all_addr *addr, char *ar
   if (addr)
     {
 #ifdef HAVE_IPV6
-      /* TODO: support scoped addresses. struct all_addr doesn't store scope IDs. */
       inet_ntop(flags & F_IPV4 ? AF_INET : AF_INET6,
 		addr, addrbuff, ADDRSTRLEN);
 #else

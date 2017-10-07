@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # dnsmasq is Copyright (c) 2000-2009 Simon Kelley
+=======
+# dnsmasq is Copyright (c) 2000-2010 Simon Kelley
+>>>>>>> v2.52
 #
 #  This program is free software; you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -18,22 +22,37 @@ BINDIR = ${PREFIX}/sbin
 MANDIR = ${PREFIX}/share/man
 LOCALEDIR = ${PREFIX}/share/locale
 
+<<<<<<< HEAD
 SRC = src
 PO = po
 MAN = man
 
+=======
+>>>>>>> v2.52
 PKG_CONFIG = pkg-config
 INSTALL = install
 MSGMERGE = msgmerge
 MSGFMT = msgfmt
 XGETTEXT = xgettext
 
+<<<<<<< HEAD
 #################################################################
 
+=======
+CFLAGS = -Wall -W -O2
+
+#################################################################
+
+SRC = src
+PO = po
+MAN = man
+
+>>>>>>> v2.52
 DNSMASQ_CFLAGS=`echo $(COPTS) | ../bld/pkg-wrapper HAVE_DBUS $(PKG_CONFIG) --cflags dbus-1` 
 DNSMASQ_LIBS=  `echo $(COPTS) | ../bld/pkg-wrapper HAVE_DBUS $(PKG_CONFIG) --libs dbus-1` 
 SUNOS_LIBS= `if uname | grep SunOS 2>&1 >/dev/null; then echo -lsocket -lnsl -lposix4; fi`
 
+<<<<<<< HEAD
 all :   dnsmasq
 
 dnsmasq :
@@ -41,6 +60,17 @@ dnsmasq :
  DNSMASQ_CFLAGS="$(DNSMASQ_CFLAGS)" \
  DNSMASQ_LIBS="$(DNSMASQ_LIBS) $(SUNOS_LIBS)" \
  -f ../bld/Makefile dnsmasq 
+=======
+OBJS = cache.o rfc1035.o util.o option.o forward.o network.o \
+       dnsmasq.o dhcp.o lease.o rfc2131.o netlink.o dbus.o bpf.o \
+       helper.o tftp.o log.o
+
+all :
+	@cd $(SRC) && $(MAKE) \
+ BUILD_CFLAGS="$(DNSMASQ_CFLAGS)" \
+ BUILD_LIBS="$(DNSMASQ_LIBS) $(SUNOS_LIBS)" \
+ -f ../Makefile dnsmasq 
+>>>>>>> v2.52
 
 clean :
 	rm -f *~ $(SRC)/*.mo contrib/*/*~ */*~ $(SRC)/*.pot 
@@ -56,6 +86,7 @@ install-common :
 all-i18n :
 	@cd $(SRC) && $(MAKE) \
  I18N=-DLOCALEDIR='\"$(LOCALEDIR)\"' \
+<<<<<<< HEAD
  DNSMASQ_CFLAGS="$(DNSMASQ_CFLAGS) `$(PKG_CONFIG) --cflags libidn`" \
  DNSMASQ_LIBS="$(DNSMASQ_LIBS) $(SUNOS_LIBS) `$(PKG_CONFIG) --libs libidn`"  \
  -f ../bld/Makefile dnsmasq 
@@ -63,6 +94,14 @@ all-i18n :
 		cd ../$(SRC) && $(MAKE) \
  MSGMERGE=$(MSGMERGE) MSGFMT=$(MSGFMT) XGETTEXT=$(XGETTEXT) \
  -f ../bld/Makefile $${f%.po}.mo; \
+=======
+ BUILD_CFLAGS="$(DNSMASQ_CFLAGS) `$(PKG_CONFIG) --cflags libidn`" \
+ BUILD_LIBS="$(DNSMASQ_LIBS) $(SUNOS_LIBS) `$(PKG_CONFIG) --libs libidn`"  \
+ -f ../Makefile dnsmasq
+	@cd $(PO); for f in *.po; do \
+		cd ../$(SRC) && $(MAKE) \
+ -f ../Makefile $${f%.po}.mo; \
+>>>>>>> v2.52
 	done
 
 install-i18n : all-i18n install-common
@@ -70,9 +109,32 @@ install-i18n : all-i18n install-common
 	cd $(MAN); ../bld/install-man $(DESTDIR)$(MANDIR) $(INSTALL)
 
 merge :
+<<<<<<< HEAD
 	@cd $(SRC) && $(MAKE) XGETTEXT=$(XGETTEXT) -f ../bld/Makefile dnsmasq.pot
+=======
+	@cd $(SRC) && $(MAKE) -f ../Makefile dnsmasq.pot
+>>>>>>> v2.52
 	@cd $(PO); for f in *.po; do \
 		echo -n msgmerge $$f && $(MSGMERGE) --no-wrap -U $$f ../$(SRC)/dnsmasq.pot; \
 	done
 
 
+<<<<<<< HEAD
+=======
+# rules below are targets in recusive makes with cwd=$(SRC)
+
+.c.o:
+	$(CC) $(CFLAGS) $(COPTS) $(I18N) $(BUILD_CFLAGS) $(RPM_OPT_FLAGS) -c $<
+
+dnsmasq : $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(BUILD_LIBS) $(LIBS) 
+
+dnsmasq.pot : $(OBJS:.o=.c) dnsmasq.h config.h
+	$(XGETTEXT) -d dnsmasq --foreign-user --omit-header --keyword=_ -o $@ -i $(OBJS:.o=.c)
+
+%.mo : ../po/%.po dnsmasq.pot
+	$(MSGMERGE) -o - ../po/$*.po dnsmasq.pot | $(MSGFMT) -o $*.mo -
+
+
+.PHONY : all clean install install-common all-i18n install-i18n merge 
+>>>>>>> v2.52
