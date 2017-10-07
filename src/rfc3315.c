@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2014 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2017 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -89,7 +89,7 @@ unsigned short dhcp6_reply(struct dhcp_context *context, int interface, char *if
   for (vendor = daemon->dhcp_vendors; vendor; vendor = vendor->next)
     vendor->netid.next = &vendor->netid;
   
-  save_counter(0);
+  reset_counter();
   state.context = context;
   state.interface = interface;
   state.iface_name = iface_name;
@@ -118,7 +118,7 @@ static int dhcp6_maybe_relay(struct state *state, void *inbuff, size_t sz,
   void *opt;
   struct dhcp_vendor *vendor;
 
-  /* if not an encaplsulated relayed message, just do the stuff */
+  /* if not an encapsulated relayed message, just do the stuff */
   if (msg_type != DHCP6RELAYFORW)
     {
       /* if link_address != NULL if points to the link address field of the 
@@ -130,7 +130,7 @@ static int dhcp6_maybe_relay(struct state *state, void *inbuff, size_t sz,
       MAC address from the local ND cache. */
       
       if (!state->link_address)
-	get_client_mac(client_addr, state->interface, state->mac, &state->mac_len, &state->mac_type);
+	get_client_mac(client_addr, state->interface, state->mac, &state->mac_len, &state->mac_type, now);
       else
 	{
 	  struct dhcp_context *c;
@@ -206,6 +206,9 @@ static int dhcp6_maybe_relay(struct state *state, void *inbuff, size_t sz,
   /* RFC-6939 */
   if ((opt = opt6_find(opts, end, OPTION6_CLIENT_MAC, 3)))
     {
+      if (opt6_len(opt) - 2 > DHCP_CHADDR_MAX) {
+        return 0;
+      }
       state->mac_type = opt6_uint(opt, 0, 2);
       state->mac_len = opt6_len(opt) - 2;
       memcpy(&state->mac[0], opt6_ptr(opt, 2), state->mac_len);
@@ -213,6 +216,9 @@ static int dhcp6_maybe_relay(struct state *state, void *inbuff, size_t sz,
   
   for (opt = opts; opt; opt = opt6_next(opt, end))
     {
+      if (opt6_ptr(opt, 0) + opt6_len(opt) >= end) {
+        return 0;
+      }
       int o = new_opt6(opt6_type(opt));
       if (opt6_type(opt) == OPTION6_RELAY_MSG)
 	{
@@ -262,7 +268,7 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
   state->hostname_auth = 0;
   state->hostname = NULL;
   state->client_hostname = NULL;
-  state->fqdn_flags = 0x01; /* default to send if we recieve no FQDN option */
+  state->fqdn_flags = 0x01; /* default to send if we receive no FQDN option */
 #ifdef OPTION6_PREFIX_CLASS
   state->send_prefix_class = NULL;
 #endif
@@ -313,8 +319,8 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
   else if (msg_type != DHCP6IREQ)
     return 0;
 
-  /* server-id must match except for SOLICIT and CONFIRM messages */
-  if (msg_type != DHCP6SOLICIT && msg_type != DHCP6CONFIRM && msg_type != DHCP6IREQ &&
+  /* server-id must match except for SOLICIT, CONFIRM and REBIND messages */
+  if (msg_type != DHCP6SOLICIT && msg_type != DHCP6CONFIRM && msg_type != DHCP6IREQ && msg_type != DHCP6REBIND &&
       (!(opt = opt6_find(state->packet_options, state->end, OPTION6_SERVER_ID, 1)) ||
        opt6_len(opt) != daemon->duid_len ||
        memcmp(opt6_ptr(opt, 0), daemon->duid, daemon->duid_len) != 0))
@@ -328,6 +334,7 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
       (msg_type == DHCP6REQUEST || msg_type == DHCP6RENEW || msg_type == DHCP6RELEASE || msg_type == DHCP6DECLINE))
     
     {  
+      *outmsgtypep = DHCP6REPLY;
       o1 = new_opt6(OPTION6_STATUS_CODE);
       put_opt6_short(DHCP6USEMULTI);
       put_opt6_string("Use multicast");
@@ -380,7 +387,7 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
   
   /* dhcp-match. If we have hex-and-wildcards, look for a left-anchored match.
      Otherwise assume the option is an array, and look for a matching element. 
-     If no data given, existance of the option is enough. This code handles 
+     If no data given, existence of the option is enough. This code handles 
      V-I opts too. */
   for (opt_cfg = daemon->dhcp_match6; opt_cfg; opt_cfg = opt_cfg->next)
     {
@@ -525,7 +532,14 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
       if (have_config(config, CONFIG_DISABLE))
 	ignore = 1;
     }
-
+  else if (state->clid &&
+	   find_config(daemon->dhcp_conf, NULL, state->clid, state->clid_len, state->mac, state->mac_len, state->mac_type, NULL))
+    {
+      known_id.net = "known-othernet";
+      known_id.next = state->tags;
+      state->tags = &known_id;
+    }
+  
 #ifdef OPTION6_PREFIX_CLASS
   /* OPTION_PREFIX_CLASS in ORO, send addresses in all prefix classes */
   if (daemon->prefix_classes && (msg_type == DHCP6SOLICIT || msg_type == DHCP6REQUEST))
@@ -690,6 +704,8 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 #endif
 
 	    o = build_ia(state, &t1cntr);
+	    if (address_assigned)
+		address_assigned = 2;
 
 	    for (ia_counter = 0; ia_option; ia_counter++, ia_option = opt6_find(opt6_next(ia_option, ia_end), ia_end, OPTION6_IAADDR, 24))
 	      {
@@ -780,6 +796,27 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 		address_assigned = 1;
 	      }
 	    
+	    if (address_assigned != 1)
+	      {
+		/* If the server will not assign any addresses to any IAs in a
+		   subsequent Request from the client, the server MUST send an Advertise
+		   message to the client that doesn't include any IA options. */
+		if (!state->lease_allocate)
+		  {
+		    save_counter(o);
+		    continue;
+		  }
+		
+		/* If the server cannot assign any addresses to an IA in the message
+		   from the client, the server MUST include the IA in the Reply message
+		   with no addresses in the IA and a Status Code option in the IA
+		   containing status code NoAddrsAvail. */
+		o1 = new_opt6(OPTION6_STATUS_CODE);
+		put_opt6_short(DHCP6NOADDRS);
+		put_opt6_string(_("address unavailable"));
+		end_opt6(o1);
+	      }
+	    
 	    end_ia(t1cntr, min_time, 0);
 	    end_opt6(o);	
 	  }
@@ -805,7 +842,16 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 	    put_opt6_short(DHCP6NOADDRS);
 	    put_opt6_string(_("no addresses available"));
 	    end_opt6(o1);
-	    log6_packet(state, "DHCPADVERTISE", NULL, _("no addresses available"));
+
+	    /* Some clients will ask repeatedly when we're not giving
+	       out addresses because we're in stateless mode. Avoid spamming
+	       the log in that case. */
+	    for (c = state->context; c; c = c->current)
+	      if (!(c->flags & CONTEXT_RA_STATELESS))
+		{
+		  log6_packet(state, state->lease_allocate ? "DHCPREPLY" : "DHCPADVERTISE", NULL, _("no addresses available"));
+		  break;
+		}
 	  }
 
 	break;
@@ -861,7 +907,7 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 		      {
 			/* Static range, not configured. */
 			o1 = new_opt6(OPTION6_STATUS_CODE);
-			put_opt6_short(DHCP6UNSPEC);
+			put_opt6_short(DHCP6NOADDRS);
 			put_opt6_string(_("address unavailable"));
 			end_opt6(o1);
 		      }
@@ -1014,9 +1060,9 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 		  {
 		    preferred_time = valid_time = 0;
 		    message = _("address invalid");
-		  }
+		  } 
 
-		if (message)
+		if (message && (message != state->hostname))
 		  log6_packet(state, "DHCPREPLY", req_addr, message);	
 		else
 		  log6_quiet(state, "DHCPREPLY", req_addr, message);
@@ -1039,6 +1085,8 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
       
     case DHCP6CONFIRM:
       {
+	int good_addr = 0;
+
 	/* set reply message type */
 	*outmsgtypep = DHCP6REPLY;
 	
@@ -1054,7 +1102,7 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 	      {
 		struct in6_addr *req_addr = opt6_ptr(ia_option, 0);
 		
-		if (!address6_available(state->context, req_addr, tagif, 1))
+		if (!address6_valid(state->context, req_addr, tagif, 1))
 		  {
 		    o1 = new_opt6(OPTION6_STATUS_CODE);
 		    put_opt6_short(DHCP6NOTONLINK);
@@ -1063,9 +1111,14 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 		    return 1;
 		  }
 
+		good_addr = 1;
 		log6_quiet(state, "DHCPREPLY", req_addr, state->hostname);
 	      }
 	  }	 
+	
+	/* No addresses, no reply: RFC 3315 18.2.2 */
+	if (!good_addr)
+	  return 0;
 
 	o1 = new_opt6(OPTION6_STATUS_CODE);
 	put_opt6_short(DHCP6SUCCESS );
@@ -1232,6 +1285,12 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 	      }
 	    
 	  }
+
+	/* We must answer with 'success' in global section anyway */
+	o1 = new_opt6(OPTION6_STATUS_CODE);
+	put_opt6_short(DHCP6SUCCESS);
+	put_opt6_string(_("success"));
+	end_opt6(o1);
 	break;
       }
 
@@ -1274,14 +1333,14 @@ static struct dhcp_netid *add_options(struct state *state, int do_refresh)
       
       if (opt_cfg->opt == OPTION6_REFRESH_TIME)
 	done_refresh = 1;
+       
+      if (opt_cfg->opt == OPTION6_DNS_SERVER)
+	done_dns = 1;
       
       if (opt_cfg->flags & DHOPT_ADDR6)
 	{
 	  int len, j;
 	  struct in6_addr *a;
-	  
-	  if (opt_cfg->opt == OPTION6_DNS_SERVER)
-	    done_dns = 1;
 	  
 	  for (a = (struct in6_addr *)opt_cfg->val, len = opt_cfg->len, j = 0; 
 	       j < opt_cfg->len; j += IN6ADDRSZ, a++)
@@ -1341,7 +1400,7 @@ static struct dhcp_netid *add_options(struct state *state, int do_refresh)
       unsigned int lease_time = 0xffffffff;
       
       /* Find the smallest lease tie of all contexts,
-	 subjext to the RFC-4242 stipulation that this must not 
+	 subject to the RFC-4242 stipulation that this must not 
 	 be less than 600. */
       for (c = state->context; c; c = c->next)
 	if (c->lease_time < lease_time)
@@ -1426,10 +1485,10 @@ static struct dhcp_netid *add_options(struct state *state, int do_refresh)
       if ((p = expand(len + 2)))
 	{
 	  *(p++) = state->fqdn_flags;
-	  p = do_rfc1035_name(p, state->hostname);
+	  p = do_rfc1035_name(p, state->hostname, NULL);
 	  if (state->send_domain)
 	    {
-	      p = do_rfc1035_name(p, state->send_domain);
+	      p = do_rfc1035_name(p, state->send_domain, NULL);
 	      *p = 0;
 	    }
 	}
@@ -1929,7 +1988,7 @@ static void log6_packet(struct state *state, char *type, struct in6_addr *addr, 
 
   if (addr)
     {
-      inet_ntop(AF_INET6, addr, daemon->dhcp_buff2, 255);
+      inet_ntop(AF_INET6, addr, daemon->dhcp_buff2, DHCP_BUFF_SZ - 1);
       strcat(daemon->dhcp_buff2, " ");
     }
   else
@@ -2008,7 +2067,8 @@ static unsigned int opt6_uint(unsigned char *opt, int offset, int size)
   return ret;
 } 
 
-void relay_upstream6(struct dhcp_relay *relay, ssize_t sz, struct in6_addr *peer_address, u32 scope_id)
+void relay_upstream6(struct dhcp_relay *relay, ssize_t sz, 
+		     struct in6_addr *peer_address, u32 scope_id, time_t now)
 {
   /* ->local is same value for all relays on ->current chain */
   
@@ -2022,7 +2082,7 @@ void relay_upstream6(struct dhcp_relay *relay, ssize_t sz, struct in6_addr *peer
   unsigned char mac[DHCP_CHADDR_MAX];
 
   inet_pton(AF_INET6, ALL_SERVERS, &multicast);
-  get_client_mac(peer_address, scope_id, mac, &maclen, &mactype);
+  get_client_mac(peer_address, scope_id, mac, &maclen, &mactype, now);
 
   /* source address == relay address */
   from.addr.addr6 = relay->local.addr.addr6;
@@ -2037,7 +2097,7 @@ void relay_upstream6(struct dhcp_relay *relay, ssize_t sz, struct in6_addr *peer
   if (hopcount > 32)
     return;
 
-  save_counter(0);
+  reset_counter();
 
   if ((header = put_opt6(NULL, 34)))
     {
@@ -2080,7 +2140,7 @@ void relay_upstream6(struct dhcp_relay *relay, ssize_t sz, struct in6_addr *peer
 		my_syslog(MS_DHCP | LOG_ERR, _("Cannot multicast to DHCPv6 server without correct interface"));
 	    }
 		
-	  send_from(daemon->dhcp6fd, 0, daemon->outpacket.iov_base, save_counter(0), &to, &from, 0);
+	  send_from(daemon->dhcp6fd, 0, daemon->outpacket.iov_base, save_counter(-1), &to, &from, 0);
 	  
 	  if (option_bool(OPT_LOG_OPTS))
 	    {
@@ -2114,7 +2174,7 @@ unsigned short relay_reply6(struct sockaddr_in6 *peer, ssize_t sz, char *arrival
 	(!relay->interface || wildcard_match(relay->interface, arrival_interface)))
       break;
       
-  save_counter(0);
+  reset_counter();
 
   if (relay)
     {

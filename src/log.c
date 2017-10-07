@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2014 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2017 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -154,7 +154,7 @@ static void log_write(void)
    
   while (entries)
     {
-      /* The data in the payoad is written with a terminating zero character 
+      /* The data in the payload is written with a terminating zero character 
 	 and the length reflects this. For a stream connection we need to 
 	 send the zero as a record terminator, but this isn't done for a 
 	 datagram connection, so treat the length as one less than reality 
@@ -288,7 +288,9 @@ void my_syslog(int priority, const char *format, ...)
     func = "-tftp";
   else if ((LOG_FACMASK & priority) == MS_DHCP)
     func = "-dhcp";
-      
+  else if ((LOG_FACMASK & priority) == MS_SCRIPT)
+    func = "-script";
+	    
 #ifdef LOG_PRI
   priority = LOG_PRI(priority);
 #else
@@ -421,25 +423,22 @@ void my_syslog(int priority, const char *format, ...)
     } 
 }
 
-void set_log_writer(fd_set *set, int *maxfdp)
+void set_log_writer(void)
 {
   if (entries && log_fd != -1 && connection_good)
-    {
-      FD_SET(log_fd, set);
-      bump_maxfd(log_fd, maxfdp);
-    }
+    poll_listen(log_fd, POLLOUT);
 }
 
-void check_log_writer(fd_set *set)
+void check_log_writer(int force)
 {
-  if (log_fd != -1 && (!set || FD_ISSET(log_fd, set)))
+  if (log_fd != -1 && (force || poll_check(log_fd, POLLOUT)))
     log_write();
 }
 
 void flush_log(void)
 {
   /* write until queue empty, but don't loop forever if there's
-   no connection to the syslog in existance */
+   no connection to the syslog in existence */
   while (log_fd != -1)
     {
       struct timespec waiter;

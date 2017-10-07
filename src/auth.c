@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2014 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2017 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,36 +18,53 @@
 
 #ifdef HAVE_AUTH
 
+static struct addrlist *find_addrlist(struct addrlist *list, int flag, struct all_addr *addr_u)
+{
+  do {
+    if (!(list->flags & ADDRLIST_IPV6))
+      {
+	struct in_addr netmask, addr = addr_u->addr.addr4;
+	
+	if (!(flag & F_IPV4))
+	  continue;
+	
+	netmask.s_addr = htonl(~(in_addr_t)0 << (32 - list->prefixlen));
+	
+	if  (is_same_net(addr, list->addr.addr.addr4, netmask))
+	  return list;
+      }
+#ifdef HAVE_IPV6
+    else if (is_same_net6(&(addr_u->addr.addr6), &list->addr.addr.addr6, list->prefixlen))
+      return list;
+#endif
+    
+  } while ((list = list->next));
+  
+  return NULL;
+}
+
 static struct addrlist *find_subnet(struct auth_zone *zone, int flag, struct all_addr *addr_u)
 {
-  struct addrlist *subnet;
+  if (!zone->subnet)
+    return NULL;
+  
+  return find_addrlist(zone->subnet, flag, addr_u);
+}
 
-  for (subnet = zone->subnet; subnet; subnet = subnet->next)
-    {
-      if (!(subnet->flags & ADDRLIST_IPV6))
-	{
-	  struct in_addr netmask, addr = addr_u->addr.addr4;
-
-	  if (!(flag & F_IPV4))
-	    continue;
-	  
-	  netmask.s_addr = htonl(~((1 << (32 - subnet->prefixlen)) - 1));
-	  
-	  if  (is_same_net(addr, subnet->addr.addr.addr4, netmask))
-	    return subnet;
-	}
-#ifdef HAVE_IPV6
-      else if (is_same_net6(&(addr_u->addr.addr6), &subnet->addr.addr.addr6, subnet->prefixlen))
-	return subnet;
-#endif
-
-    }
-  return NULL;
+static struct addrlist *find_exclude(struct auth_zone *zone, int flag, struct all_addr *addr_u)
+{
+  if (!zone->exclude)
+    return NULL;
+  
+  return find_addrlist(zone->exclude, flag, addr_u);
 }
 
 static int filter_zone(struct auth_zone *zone, int flag, struct all_addr *addr_u)
 {
-  /* No zones specified, no filter */
+  if (find_exclude(zone, flag, addr_u))
+    return 0;
+
+  /* No subnets specified, no filter */
   if (!zone->subnet)
     return 1;
   
@@ -81,7 +98,8 @@ int in_zone(struct auth_zone *zone, char *name, char **cut)
 }
 
 
-size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t now, union mysockaddr *peer_addr, int local_query) 
+size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t now, union mysockaddr *peer_addr, 
+		   int local_query, int do_bit, int have_pseudoheader) 
 {
   char *name = daemon->namebuff;
   unsigned char *p, *ansp;
@@ -98,7 +116,8 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
   struct interface_name *intr;
   struct naptr *na;
   struct all_addr addr;
-  struct cname *a;
+  struct cname *a, *candidate;
+  unsigned int wclen;
   
   if (ntohs(header->qdcount) == 0 || OPCODE(header) != QUERY )
     return 0;
@@ -114,6 +133,7 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
     {
       unsigned short flag = 0;
       int found = 0;
+      int cname_wildcard = 0;
   
       /* save pointer to name for copying into answers */
       nameoffset = p - (unsigned char *)header;
@@ -131,24 +151,27 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 	  continue;
 	}
 
-      if (qtype == T_PTR)
+      if ((qtype == T_PTR || qtype == T_SOA || qtype == T_NS) &&
+	  (flag = in_arpa_name_2_addr(name, &addr)) &&
+	  !local_query)
 	{
-	  if (!(flag = in_arpa_name_2_addr(name, &addr)))
-	    continue;
-
-	  if (!local_query)
+	  for (zone = daemon->auth_zones; zone; zone = zone->next)
+	    if ((subnet = find_subnet(zone, flag, &addr)))
+	      break;
+	  
+	  if (!zone)
 	    {
-	      for (zone = daemon->auth_zones; zone; zone = zone->next)
-		if ((subnet = find_subnet(zone, flag, &addr)))
-		  break;
-	      
-	      if (!zone)
-		{
-		  auth = 0;
-		  continue;
-		}
+	      auth = 0;
+	      continue;
 	    }
+	  else if (qtype == T_SOA)
+	    soa = 1, found = 1;
+	  else if (qtype == T_NS)
+	    ns = 1, found = 1;
+	}
 
+      if (qtype == T_PTR && flag)
+	{
 	  intr = NULL;
 
 	  if (flag == F_IPV4)
@@ -186,7 +209,7 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 	  
 	  if (intr)
 	    {
-	      if (in_zone(zone, intr->name, NULL))
+	      if (local_query || in_zone(zone, intr->name, NULL))
 		{	
 		  found = 1;
 		  log_query(flag | F_REVERSE | F_CONFIG, intr->name, &addr, NULL);
@@ -208,8 +231,11 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 		    *p = 0; /* must be bare name */
 		  
 		  /* add  external domain */
-		  strcat(name, ".");
-		  strcat(name, zone->domain);
+		  if (zone)
+		    {
+		      strcat(name, ".");
+		      strcat(name, zone->domain);
+		    }
 		  log_query(flag | F_DHCP | F_REVERSE, name, &addr, record_source(crecp->uid));
 		  found = 1;
 		  if (add_resource_record(header, limit, &trunc, nameoffset, &ansp, 
@@ -217,7 +243,7 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 					  T_PTR, C_IN, "d", name))
 		    anscount++;
 		}
-	      else if (crecp->flags & (F_DHCP | F_HOSTS) && in_zone(zone, name, NULL))
+	      else if (crecp->flags & (F_DHCP | F_HOSTS) && (local_query || in_zone(zone, name, NULL)))
 		{
 		  log_query(crecp->flags & ~F_FORWARD, name, &addr, record_source(crecp->uid));
 		  found = 1;
@@ -240,14 +266,20 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 	}
       
     cname_restart:
-      for (zone = daemon->auth_zones; zone; zone = zone->next)
-	if (in_zone(zone, name, &cut))
-	  break;
-      
-      if (!zone)
+      if (found)
+	/* NS and SOA .arpa requests have set found above. */
+	cut = NULL;
+      else
 	{
-	  auth = 0;
-	  continue;
+	  for (zone = daemon->auth_zones; zone; zone = zone->next)
+	    if (in_zone(zone, name, &cut))
+	      break;
+	  
+	  if (!zone)
+	    {
+	      auth = 0;
+	      continue;
+	    }
 	}
 
       for (rec = daemon->mxnames; rec; rec = rec->next)
@@ -363,6 +395,10 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 		 if (((addrlist->flags & ADDRLIST_IPV6)  ? T_AAAA : T_A) == qtype &&
 		     (local_query || filter_zone(zone, flag, &addrlist->addr)))
 		   {
+#ifdef HAVE_IPV6
+		     if (addrlist->flags & ADDRLIST_REVONLY)
+		       continue;
+#endif
 		     found = 1;
 		     log_query(F_FORWARD | F_CONFIG | flag, name, &addrlist->addr, NULL);
 		     if (add_resource_record(header, limit, &trunc, nameoffset, &ansp, 
@@ -372,25 +408,6 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 		   }
 	     }
        
-       for (a = daemon->cnames; a; a = a->next)
-	 if (hostname_isequal(name, a->alias) )
-	   {
-	     log_query(F_CONFIG | F_CNAME, name, NULL, NULL);
-	     strcpy(name, a->target);
-	     if (!strchr(name, '.'))
-	       {
-		 strcat(name, ".");
-		 strcat(name, zone->domain);
-	       }
-	     found = 1;
-	     if (add_resource_record(header, limit, &trunc, nameoffset, &ansp, 
-				     daemon->auth_ttl, &nameoffset,
-				     T_CNAME, C_IN, "d", name))
-	       anscount++;
-	     
-	     goto cname_restart;
-	   }
-
       if (!cut)
 	{
 	  nxdomain = 0;
@@ -409,7 +426,10 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 		peer_addr->in.sin_port = 0;
 #ifdef HAVE_IPV6
 	      else
-		peer_addr->in6.sin6_port = 0; 
+		{
+		  peer_addr->in6.sin6_port = 0; 
+		  peer_addr->in6.sin6_scope_id = 0;
+		}
 #endif
 	      
 	      for (peers = daemon->auth_peers; peers; peers = peers->next)
@@ -493,8 +513,62 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 	      } while ((crecp = cache_find_by_name(crecp, name, now, F_IPV4 | F_IPV6)));
 	}
       
-      if (!found)
-	log_query(flag | F_NEG | (nxdomain ? F_NXDOMAIN : 0) | F_FORWARD | F_AUTH, name, NULL, NULL);
+      /* Only supply CNAME if no record for any type is known. */
+      if (nxdomain)
+	{
+	  /* Check for possible wildcard match against *.domain 
+	     return length of match, to get longest.
+	     Note that if return length of wildcard section, so
+	     we match b.simon to _both_ *.simon and b.simon
+	     but return a longer (better) match to b.simon.
+	  */  
+	  for (wclen = 0, candidate = NULL, a = daemon->cnames; a; a = a->next)
+	    if (a->alias[0] == '*')
+	      {
+		char *test = name;
+		
+		while ((test = strchr(test+1, '.')))
+		  {
+		    if (hostname_isequal(test, &(a->alias[1])))
+		      {
+			if (strlen(test) > wclen && !cname_wildcard)
+			  {
+			    wclen = strlen(test);
+			    candidate = a;
+			    cname_wildcard = 1;
+			  }
+			break;
+		      }
+		  }
+		
+	      }
+	    else if (hostname_isequal(a->alias, name) && strlen(a->alias) > wclen)
+	      {
+		/* Simple case, no wildcard */
+		wclen = strlen(a->alias);
+		candidate = a;
+	      }
+	  
+	  if (candidate)
+	    {
+	      log_query(F_CONFIG | F_CNAME, name, NULL, NULL);
+	      strcpy(name, candidate->target);
+	      if (!strchr(name, '.'))
+		{
+		  strcat(name, ".");
+		  strcat(name, zone->domain);
+		}
+	      found = 1;
+	      if (add_resource_record(header, limit, &trunc, nameoffset, &ansp, 
+				      daemon->auth_ttl, &nameoffset,
+				      T_CNAME, C_IN, "d", name))
+		anscount++;
+	      
+	      goto cname_restart;
+	    }
+
+	  log_query(flag | F_NEG | (nxdomain ? F_NXDOMAIN : 0) | F_FORWARD | F_AUTH, name, NULL, NULL);
+	}
       
     }
   
@@ -518,12 +592,12 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
 	      char *p = name;
 	      
 	      if (subnet->prefixlen >= 24)
-		p += sprintf(p, "%d.", a & 0xff);
+		p += sprintf(p, "%u.", a & 0xff);
 	      a = a >> 8;
 	      if (subnet->prefixlen >= 16 )
-		p += sprintf(p, "%d.", a & 0xff);
+		p += sprintf(p, "%u.", a & 0xff);
 	      a = a >> 8;
-	      p += sprintf(p, "%d.in-addr.arpa", a & 0xff);
+	      p += sprintf(p, "%u.in-addr.arpa", a & 0xff);
 	      
 	    }
 #ifdef HAVE_IPV6
@@ -786,7 +860,7 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
       header->hb4 &= ~HB4_RA;
     }
 
-  /* authoritive */
+  /* authoritative */
   if (auth)
     header->hb3 |= HB3_AA;
   
@@ -801,6 +875,11 @@ size_t answer_auth(struct dns_header *header, char *limit, size_t qlen, time_t n
   header->ancount = htons(anscount);
   header->nscount = htons(authcount);
   header->arcount = htons(0);
+
+  /* Advertise our packet size limit in our reply */
+  if (have_pseudoheader)
+    return add_pseudoheader(header,  ansp - (unsigned char *)header, (unsigned char *)limit, daemon->edns_pktsz, 0, NULL, 0, do_bit, 0);
+
   return ansp - (unsigned char *)header;
 }
   

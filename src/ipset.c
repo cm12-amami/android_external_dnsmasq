@@ -16,7 +16,7 @@
 
 #include "dnsmasq.h"
 
-#ifdef HAVE_IPSET
+#if defined(HAVE_IPSET) && defined(HAVE_LINUX_NETWORK)
 
 #include <string.h>
 #include <errno.h>
@@ -121,7 +121,6 @@ static int new_add_to_ipset(const char *setname, const struct all_addr *ipaddr, 
   struct my_nlattr *nested[2];
   uint8_t proto;
   int addrsz = INADDRSZ;
-  ssize_t rc;
 
 #ifdef HAVE_IPV6
   if (af == AF_INET6)
@@ -162,9 +161,10 @@ static int new_add_to_ipset(const char *setname, const struct all_addr *ipaddr, 
   nested[1]->nla_len = (void *)buffer + NL_ALIGN(nlh->nlmsg_len) - (void *)nested[1];
   nested[0]->nla_len = (void *)buffer + NL_ALIGN(nlh->nlmsg_len) - (void *)nested[0];
 	
-  while ((rc = sendto(ipset_sock, buffer, nlh->nlmsg_len, 0,
-		      (struct sockaddr *)&snl, sizeof(snl))) == -1 && retry_send());
-  return rc;
+  while (retry_send(sendto(ipset_sock, buffer, nlh->nlmsg_len, 0,
+			   (struct sockaddr *)&snl, sizeof(snl))));
+								    
+  return errno == 0 ? 0 : -1;
 }
 
 
@@ -211,7 +211,7 @@ static int old_add_to_ipset(const char *setname, const struct all_addr *ipaddr, 
 
 int add_to_ipset(const char *setname, const struct all_addr *ipaddr, int flags, int remove)
 {
-  int af = AF_INET;
+  int ret = 0, af = AF_INET;
 
 #ifdef HAVE_IPV6
   if (flags & F_IPV6)
@@ -219,11 +219,20 @@ int add_to_ipset(const char *setname, const struct all_addr *ipaddr, int flags, 
       af = AF_INET6;
       /* old method only supports IPv4 */
       if (old_kernel)
-	return -1;
+	{
+	  errno = EAFNOSUPPORT ;
+	  ret = -1;
+	}
     }
 #endif
   
-  return old_kernel ? old_add_to_ipset(setname, ipaddr, remove) : new_add_to_ipset(setname, ipaddr, af, remove);
+  if (ret != -1) 
+    ret = old_kernel ? old_add_to_ipset(setname, ipaddr, remove) : new_add_to_ipset(setname, ipaddr, af, remove);
+
+  if (ret == -1)
+     my_syslog(LOG_ERR, _("failed to update ipset %s: %s"), setname, strerror(errno));
+
+  return ret;
 }
 
 #endif

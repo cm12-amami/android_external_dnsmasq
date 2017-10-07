@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2014 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2017 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -16,6 +16,7 @@
 
 #define NAMESERVER_PORT 53
 #define TFTP_PORT       69
+#define MAX_PORT        65535u
 
 #define IN6ADDRSZ       16
 #define INADDRSZ        4
@@ -77,6 +78,8 @@
 
 #define EDNS0_OPTION_MAC            65001 /* dyndns.org temporary assignment */
 #define EDNS0_OPTION_CLIENT_SUBNET  8     /* IANA */
+#define EDNS0_OPTION_NOMDEVICEID    65073 /* Nominum temporary assignment */
+#define EDNS0_OPTION_NOMCPEID       65074 /* Nominum temporary assignment */
 
 struct dns_header {
   u16 id;
@@ -84,15 +87,15 @@ struct dns_header {
   u16 qdcount,ancount,nscount,arcount;
 };
 
-#define HB3_QR       0x80
+#define HB3_QR       0x80 /* Query */
 #define HB3_OPCODE   0x78
-#define HB3_AA       0x04
-#define HB3_TC       0x02
-#define HB3_RD       0x01
+#define HB3_AA       0x04 /* Authoritative Answer */
+#define HB3_TC       0x02 /* TrunCated */
+#define HB3_RD       0x01 /* Recursion Desired */
 
-#define HB4_RA       0x80
-#define HB4_AD       0x20
-#define HB4_CD       0x10
+#define HB4_RA       0x80 /* Recursion Available */
+#define HB4_AD       0x20 /* Authenticated Data */
+#define HB4_CD       0x10 /* Checking Disabled */
 #define HB4_RCODE    0x0f
 
 #define OPCODE(x)          (((x)->hb3 & HB3_OPCODE) >> 3)
@@ -142,3 +145,11 @@ struct dns_header {
 
 #define ADD_RDLEN(header, pp, plen, len) \
   (!CHECK_LEN(header, pp, plen, len) ? 0 : (((pp) += (len)), 1))
+
+/* Escape character in our presentation format for names.
+   Cannot be '.' or /000 and must be !isprint().
+   Note that escaped chars are stored as
+   <NAME_ESCAPE> <orig-char+1>
+   to ensure that the escaped form of /000 doesn't include /000
+*/
+#define NAME_ESCAPE 1

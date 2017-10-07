@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2014 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2017 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,7 +20,9 @@
 #include <ifaddrs.h>
 
 #include <sys/param.h>
+#if defined(HAVE_BSD_NETWORK) && !defined(__APPLE__)
 #include <sys/sysctl.h>
+#endif
 #include <net/if.h>
 #include <net/route.h>
 #include <net/if_dl.h>
@@ -103,7 +105,7 @@ int arp_enumerate(void *parm, int (*callback)())
 int iface_enumerate(int family, void *parm, int (*callback)())
 {
   struct ifaddrs *head, *addrs;
-  int errsav, fd = -1, ret = 0;
+  int errsave, fd = -1, ret = 0;
 
   if (family == AF_UNSPEC)
 #if defined(HAVE_BSD_NETWORK) && !defined(__APPLE__)
@@ -235,11 +237,11 @@ int iface_enumerate(int family, void *parm, int (*callback)())
   ret = 1;
 
  err:
-  errsav = errno;
+  errsave = errno;
   freeifaddrs(head); 
   if (fd != -1)
     close(fd);
-  errno = errsav;
+  errno = errsave;
 
   return ret;
 }
@@ -359,7 +361,7 @@ void send_via_bpf(struct dhcp_packet *mess, size_t len,
   iov[3].iov_base = mess;
   iov[3].iov_len = len;
 
-  while (writev(daemon->dhcp_raw_fd, iov, 4) == -1 && retry_send());
+  while (retry_send(writev(daemon->dhcp_raw_fd, iov, 4)));
 }
 
 #endif /* defined(HAVE_BSD_NETWORK) && defined(HAVE_DHCP) */
@@ -376,7 +378,7 @@ void route_init(void)
     die(_("cannot create PF_ROUTE socket: %s"), NULL, EC_BADNET);
 }
 
-void route_sock(time_t now)
+void route_sock(void)
 {
   struct if_msghdr *msg;
   int rc = recv(daemon->routefd, daemon->packet, daemon->packet_buff_sz, 0);
@@ -401,7 +403,7 @@ void route_sock(time_t now)
    else if (msg->ifm_type == RTM_NEWADDR)
      {
        del_family = 0;
-       newaddress(now);
+       queue_event(EVENT_NEWADDR);
      }
    else if (msg->ifm_type == RTM_DELADDR)
      {
@@ -439,7 +441,7 @@ void route_sock(time_t now)
 	       of += sizeof(long) - (diff & (sizeof(long) - 1));
 	   }
        
-       newaddress(now);
+       queue_event(EVENT_NEWADDR);
      }
 }
 
