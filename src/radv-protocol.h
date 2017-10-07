@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2012 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2014 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -14,8 +14,15 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#define ALL_HOSTS                 "FF02::1"
+#define ALL_NODES                 "FF02::1"
 #define ALL_ROUTERS               "FF02::2"
+
+struct ping_packet {
+  u8 type, code;
+  u16 checksum;
+  u16 identifier;
+  u16 sequence_no;
+};
 
 struct ra_packet {
   u8 type, code;
@@ -26,19 +33,24 @@ struct ra_packet {
   u32 retrans_time;
 };
 
+struct neigh_packet {
+  u8 type, code;
+  u16 checksum;
+  u16 reserved;
+  struct in6_addr target;
+};
+
 struct prefix_opt {
   u8 type, len, prefix_len, flags;
   u32 valid_lifetime, preferred_lifetime, reserved;
   struct in6_addr prefix;
 };
 
-#define ICMP6_ROUTER_SOLICIT 133
-#define ICMP6_ROUTER_ADVERT  134
-
 #define ICMP6_OPT_SOURCE_MAC   1
 #define ICMP6_OPT_PREFIX       3
 #define ICMP6_OPT_MTU          5
 #define ICMP6_OPT_RDNSS       25
+#define ICMP6_OPT_DNSSL       31
 
 
 

@@ -4,6 +4,11 @@
 # as the long options legal on the command line. See
 # "/usr/sbin/dnsmasq --help" or "man 8 dnsmasq" for details.
 
+# Listen on this specific port instead of the standard DNS port
+# (53). Setting this to zero completely disables DNS function,
+# leaving only DHCP and/or TFTP.
+#port=5353
+
 # The following two options make you a better netizen, since they
 # tell dnsmasq to filter out queries which the public DNS cannot
 # answer, and which load the servers (especially the root servers)
@@ -15,6 +20,18 @@
 # Never forward addresses in the non-routed address spaces.
 #bogus-priv
 
+# Uncomment these to enable DNSSEC validation and caching:
+# (Requires dnsmasq to be built with DNSSEC option.)
+#conf-file=%%PREFIX%%/share/dnsmasq/trust-anchors.conf
+#dnssec
+
+# Replies which are not DNSSEC signed may be legitimate, because the domain
+# is unsigned, or may be forgeries. Setting this option tells dnsmasq to
+# check that an unsigned reply is OK, by finding a secure proof that a DS 
+# record somewhere between the root and the domain does not exist. 
+# The cost of setting this is that even queries in unsigned domains will need
+# one or more extra DNS queries to verify.
+#dnssec-check-unsigned
 
 # Uncomment this to filter useless windows-originated DNS requests
 # which can trigger dial-on-demand links needlessly.
@@ -63,6 +80,10 @@
 
 # --address (and --server) work with IPv6 addresses too.
 #address=/www.thekelleys.org.uk/fe80::20d:60ff:fe36:f83
+
+# Add the IPs of all queries to yahoo.com, google.com, and their
+# subdomains to the vpn and search ipsets:
+#ipset=/yahoo.com/google.com/vpn,search
 
 # You can control how dnsmasq talks to a server: this forces
 # queries to 10.1.2.3 to be routed via eth1
@@ -164,9 +185,36 @@
 # Do Router Advertisements, BUT NOT DHCP for this subnet.
 #dhcp-range=1234::, ra-only 
 
+# Do Router Advertisements, BUT NOT DHCP for this subnet, also try and
+# add names to the DNS for the IPv6 address of SLAAC-configured dual-stack 
+# hosts. Use the DHCPv4 lease to derive the name, network segment and 
+# MAC address and assume that the host will also have an
+# IPv6 address calculated using the SLAAC alogrithm.
+#dhcp-range=1234::, ra-names
+
 # Do Router Advertisements, BUT NOT DHCP for this subnet.
 # Set the lifetime to 46 hours. (Note: minimum lifetime is 2 hours.)
 #dhcp-range=1234::, ra-only, 48h
+
+# Do DHCP and Router Advertisements for this subnet. Set the A bit in the RA
+# so that clients can use SLAAC addresses as well as DHCP ones.
+#dhcp-range=1234::2, 1234::500, slaac
+
+# Do Router Advertisements and stateless DHCP for this subnet. Clients will
+# not get addresses from DHCP, but they will get other configuration information.
+# They will use SLAAC for addresses.
+#dhcp-range=1234::, ra-stateless
+
+# Do stateless DHCP, SLAAC, and generate DNS names for SLAAC addresses
+# from DHCPv4 leases.
+#dhcp-range=1234::, ra-stateless, ra-names
+
+# Do router advertisements for all subnets where we're doing DHCPv6
+# Unless overriden by ra-stateless, ra-names, et al, the router 
+# advertisements will have the M and O bits set, so that the clients
+# get addresses and configuration from DHCPv6, and the A bit reset, so the 
+# clients don't use SLAAC addresses.
+#enable-ra
 
 # Supply parameters for specified hosts using DHCP. There are lots
 # of valid alternatives, so we will give examples of each. Note that
@@ -293,6 +341,9 @@
 # Send DHCPv6 option for namservers as the machine running 
 # dnsmasq and another.
 #dhcp-option=option6:dns-server,[::],[1234::88]
+
+# Ask client to poll for option changes every six hours. (RFC4242)
+#dhcp-option=option6:information-refresh-time,6h
 
 # Set the NTP time server address to be the same machine as
 # is running dnsmasq
@@ -449,7 +500,7 @@
 #tftp-no-blocksize
 
 # Set the boot file name only when the "red" tag is set.
-#dhcp-boot=net:red,pxelinux.red-net
+#dhcp-boot=tag:red,pxelinux.red-net
 
 # An example of dhcp-boot with an external TFTP server: the name and IP
 # address of the server are given after the filename.
@@ -494,7 +545,7 @@
 # If you want to disable negative caching, uncomment this.
 #no-negcache
 
-# Normally responses which come form /etc/hosts and the DHCP lease
+# Normally responses which come from /etc/hosts and the DHCP lease
 # file have Time-To-Live set as zero, which conventionally means
 # do not cache further. If you are happy to trade lower load on the
 # server for potentially stale date, you can set a time-to-live (in
@@ -590,6 +641,6 @@
 # Log lots of extra information about DHCP transactions.
 #log-dhcp
 
-# Include a another lot of configuration options.
+# Include another lot of configuration options.
 #conf-file=/etc/dnsmasq.more.conf
 #conf-dir=/etc/dnsmasq.d
